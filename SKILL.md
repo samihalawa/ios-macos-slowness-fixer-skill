@@ -454,6 +454,44 @@ WindowServer CPU above about 15% usually means one of these:
 
 If `mds`/`mdworker`/`backupd`/`kernel_task` lead in `top` instead, it's indexing, Time Machine, or thermal management rather than the browser.
 
+### 4.2 Background services audit (launch agents and daemons)
+
+Always-on helpers are a frequent hidden cause: one service that is set up badly costs CPU, disk writes and memory around the clock.
+
+```bash
+python3 -I - <<'P'
+import plistlib,glob,os,collections
+rows=[]
+for f in glob.glob(os.path.expanduser('~/Library/LaunchAgents/*.plist'))+glob.glob('/Library/LaunchAgents/*.plist')+glob.glob('/Library/LaunchDaemons/*.plist'):
+  try: d=plistlib.load(open(f,'rb'))
+  except Exception: continue
+  prog=d.get('Program') or (d.get('ProgramArguments') or [''])[0]
+  logs=[(d.get(k), os.path.getsize(d.get(k))) for k in ('StandardOutPath','StandardErrorPath') if d.get(k) and d.get(k)!='/dev/null' and os.path.exists(d.get(k))]
+  rows.append((d.get('Label'),prog,d.get('KeepAlive'),d.get('ThrottleInterval'),logs,f))
+print('logs >20MB:',[(r[0],p,round(s/1e6)) for r in rows for p,s in r[4] if s>20e6])
+c=collections.Counter(r[1] for r in rows); print('same program in several plists:',[(p,n) for p,n in c.items() if n>1 and p])
+print('program missing:',[(r[0],r[1]) for r in rows if r[1].startswith('/') and not os.path.exists(r[1])])
+print('KeepAlive:',[(r[0],r[3]) for r in rows if r[2]])
+P
+launchctl list | awk 'NR>1 && $2!=0 && $2!="-"' | grep -v 'com\.apple\.'                     # failing agents
+for l in $(launchctl list | awk 'NR>1 && $2!=0 && $2!="-"{print $3}' | grep -v '^com\.apple\.'); do launchctl print gui/$(id -u)/$l 2>/dev/null | grep -E 'runs =|last exit|last terminating'; done
+```
+
+Patterns and fixes:
+
+| Pattern | Evidence | Fix |
+|---|---|---|
+| Log that never rotates | A StandardOut/ErrorPath file of hundreds of MB, often duplicating the app's own daily log | Send the agent's output to `/dev/null` when the app already logs, or cap it in place (`tail -c 5M f > t && cat t > f`), which keeps the inode for O_APPEND writers |
+| KeepAlive crash loop | `runs =` climbing fast plus a non-zero `last exit`, e.g. a startup step hitting a rate limit and the relaunch hitting it again | Raise `ThrottleInterval` (e.g. 300) and reload; fix the startup failure |
+| Duplicate autostart | The same program in two plists, e.g. the app's own login item plus a custom KeepAlive agent | Keep the one with the wanted behavior and turn off the other at its source (app setting), so it isn't recreated |
+| Cleanup job that kills itself | A reaper whose own command line matches its kill pattern; its log never appears, and `last terminating signal = 15` | Exclude its own PID and script name; then run it with `launchctl kickstart -k` and read the log back |
+| Device or network retry loop | One warning dominating the log, e.g. a pinned Bluetooth device that is absent | Follow the system default device instead of a pinned one |
+| Dead entries | The program path no longer exists | Harmless; remove only with the user's OK |
+
+Back up every plist and script before editing, reload with `launchctl bootout`/`bootstrap`, and read the state back.
+
+Orphan reapers only catch processes whose parent has exited (ppid 1). Many copies of an MCP server under a **live** long-running agent session are not orphans: report the count and parents instead of killing them silently.
+
 ## 5. Interpretation rules (lessons that prevent wrong diagnoses)
 
 - Rule out a recent OS update (2.8) before diagnosing anything long‑term.
