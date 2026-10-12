@@ -200,6 +200,37 @@ PYMOBILEDEVICE3_UDID=$U pymobiledevice3 diagnostics battery single | head -40
 
 `pymobiledevice3` takes the device through `--udid` or `PYMOBILEDEVICE3_UDID`. If an option is rejected, use the environment variable.
 
+### 2.7 More USB sources (no Developer Mode)
+
+```bash
+idevicediagnostics -u $U diagnostics GasGauge    # battery gauge summary
+idevicediagnostics -u $U diagnostics NAND        # storage controller info (when exposed)
+idevicediagnostics -u $U diagnostics WiFi
+ideviceinfo -u $U -k ProductVersion; ideviceinfo -u $U -q com.apple.mobile.software_behavior 2>/dev/null
+```
+
+MobileGestalt queries (`pymobiledevice3 diagnostics mg`, `idevicediagnostics mobilegestalt`) are deprecated on iOS 17.4 and later. Use ioreg and battery entries instead.
+
+**Unified log straight from the device.** This holds more history than a sysdiagnose. It needs `sudo`, a trusted device and the passcode, so check `sudo -n true` first. If there's no passwordless sudo, ask the user to run the one command, or use the logarchive inside the sysdiagnose (section 3.4).
+
+```bash
+sudo log collect --device-udid $U --last 6h --output $S/device.logarchive
+log show --archive $S/device.logarchive --info --predicate 'eventMessage CONTAINS "killed by jetsam"' --style compact | sed -E 's/.*Process ([^ ]+) \[[0-9]+\] killed by jetsam reason ([a-z-]+).*/\1 \2/' | sort | uniq -c | sort -rn | head -20
+```
+
+`log show` hides info and debug entries unless you pass `--info --debug`, so an empty result without them proves nothing.
+
+### 2.8 Was there a recent OS update? (rule this out before blaming anything)
+
+After a major iOS/iPadOS/macOS update, Spotlight re‑indexes, Photos re‑analyzes, Apple Intelligence downloads models, and the App Store updates apps. That can make a device slow and hot for **2–3 days, up to a week**, and Apple documents it as expected.
+
+Signs:
+- Settings shows "Optimizing Search and Siri", or Battery shows "Ongoing iOS Update / Device Setup".
+- The live log is dominated by `corespotlightd`/`mediaanalysisd`/`photoanalysisd`/`installcoordinationd`.
+- The OS build is new.
+
+If the update is less than 72 hours old, the first fix is: leave the device locked, on Wi‑Fi and charging overnight, then re‑measure. Point releases often fix known storage or System Data bugs, so check whether a newer point update exists before deeper surgery.
+
 ## 3. iPhone / iPad: deep evidence from sysdiagnose
 
 A sysdiagnose contains the power log (days of per-app energy, screen time, memory, battery throttling, and thermal data), `vm_stat`, process lists, spindumps, and microstackshots.
@@ -273,7 +304,21 @@ head -6 "$R/vm_stat.txt"
 
 Page size is 16 KB. `free` × 16 KB is free memory. `cmprssor` is RAM spent holding compressed memory. `cmprssed` is how much data is stored there. Cumulative `swapins`/`swapouts` × 16 KB is how much was swapped since boot. Memory almost full, plus heavy swap, plus many Jetsam events: the root cause is memory, not the battery.
 
-### 3.4 With Developer Mode (optional extra)
+### 3.4 Query the sysdiagnose's own unified log (no sudo needed)
+
+```bash
+LA="$R/system_logs.logarchive"
+log show --archive "$LA" --info --predicate 'eventMessage CONTAINS "killed by jetsam"' --style compact | sed -E 's/.*Process ([^ ]+) \[[0-9]+\] killed by jetsam reason ([a-z-]+).*/\1 \2/' | sort | uniq -c | sort -rn | head -20
+log show --archive "$LA" --info --predicate 'process == "SpringBoard" AND messageType == fault' --style compact | tail -20
+log show --archive "$LA" --info --predicate 'eventMessage CONTAINS[c] "thermal" AND eventMessage CONTAINS[c] "level"' --style compact | tail -20
+log show --archive "$LA" --predicate 'process == "watchdogd" OR eventMessage CONTAINS "watchdog"' --style compact | tail -20
+```
+
+Other sysdiagnose files worth a glance: `ps.txt`, `ps_thread.txt`, `taskSummary.csv`, `jetsam_priority.txt` (what is resident and at what priority), `spindump-nosymbols.txt`, `microstackshots/`, `logs/Accessibility/`, `WiFi/`, and `apfs_stats.txt`.
+
+Optional parsers when the user wants a full report: iLEAPP (`python ileapp.py -t tar -i sysdiagnose.tar.gz -o out/`, which also reads a logarchive converted with `log show --style json --archive X.logarchive > logarchive.json`), the EC‑DIGIT‑CSIRC `sysdiagnose` toolkit, and APOLLO powerlog modules. The SQL in 3.1–3.2 is usually enough.
+
+### 3.5 With Developer Mode (optional extra)
 
 iOS 17+ needs a tunnel for developer services (`sudo pymobiledevice3 remote tunneld`, then `--tunnel ''`). Then you can read live per-process CPU, memory and energy:
 
@@ -355,7 +400,65 @@ pmset -g assertions | grep -E 'PreventUserIdleSystemSleep|PreventSystemSleep|NoI
 ps -Ao %cpu,comm | grep -E 'mds|mdworker|suggestd|photolibraryd|contactsd' | sort -rn | head                      # indexing churn
 ```
 
+### 4.1 Deeper Mac checks
+
+No sudo needed:
+
+```bash
+# Why did it last shut down or restart? Positive codes are software, negative are hardware.
+log show --last 3d --predicate 'eventMessage CONTAINS "Previous shutdown cause"' --style compact | tail -5
+# SSD wear and lifetime writes (smartmontools 7.5+ reads Apple silicon NVMe without sudo)
+command -v smartctl >/dev/null || brew install smartmontools
+smartctl -a disk0 | grep -E 'Percentage Used|Data Units Written|Available Spare|Media and Data Integrity|Unsafe Shutdowns|Power On Hours'
+ioreg -rc IOBlockStorageDriver -w0 | grep -oE '"Bytes \(Write\)"=[0-9]+' | sort -t= -k2 -nr | head -1   # bytes written since boot (busiest disk; the first entry can be 0)
+# Swap's share of this boot's writes: (vm_stat Swapouts x 16384) / Bytes (Write); >10% means swap meaningfully adds wear
+iostat -d -w 2 -c 5 disk0                         # live throughput; an idle Mac should sit near zero
+footprint -p <PID>                                 # one process's real dirty memory (system-wide footprint -a needs sudo)
+top -l 2 -o cpu -n 15 -stats pid,command,cpu,mem,power | tail -16
+mdutil -s /                                       # Spotlight indexing state
+tmutil listlocalsnapshots / | wc -l               # local snapshots holding purgeable space
+launchctl list | grep -vc '^-' ; ls ~/Library/LaunchAgents /Library/LaunchAgents /Library/LaunchDaemons 2>/dev/null | wc -l
+pmset -g log | grep -E 'Wake from|DarkWake|Entering Sleep|Wake reason' | tail -20       # wake storms
+```
+
+Shutdown cause codes:
+
+| Code | Meaning |
+|---|---|
+| 5 | Clean shutdown |
+| 3 | Forced (power‑button) shutdown |
+| 0 | Power loss |
+| -60 | Battery fully drained |
+| -61 / -62 | Watchdog: an unresponsive app or WindowServer forced a shutdown or restart |
+| -64 | Kernel panic |
+| -71 / -74 / -86 / -95 / -100 / -101 | Memory, battery, proximity, CPU, power‑supply or display overheating |
+| -75 / -78 | Charger communication or current problem |
+| -103 / -104 | Battery voltage or battery fault |
+| -128 | Unknown, often memory or after a panic |
+
+With sudo (check `sudo -n true`; otherwise give the user the exact command or skip):
+
+```bash
+sudo powermetrics -n 1 -i 5000 --samplers tasks,thermal,cpu_power --show-process-energy | head -60   # per-process energy, thermal pressure
+sudo footprint -a | tail -8                                 # system-wide sys_footprint
+sudo spindump -notarget 10 10 -o $S/spindump.txt          # what everything is doing during a stall
+sudo fs_usage -w -f filesys mds_stores | head -40         # who is writing (swap one process name for another)
+sudo sfltool dumpbtm | grep -E 'Name:|Developer Name:|Disposition:' | head -80   # Login Items and Background Task Management entries
+```
+
+WindowServer CPU above about 15% usually means one of these:
+- a browser repainting many background tabs (Chrome Memory Saver or tab discarding helps);
+- many windows, Spaces or external displays with mismatched refresh rates;
+- transparency effects (System Settings › Accessibility › Display › Reduce transparency);
+- screen‑recording or capture apps.
+
+If `mds`/`mdworker`/`backupd`/`kernel_task` lead in `top` instead, it's indexing, Time Machine, or thermal management rather than the browser.
+
 ## 5. Interpretation rules (lessons that prevent wrong diagnoses)
+
+- Rule out a recent OS update (2.8) before diagnosing anything long‑term.
+- `kernel_task` writing huge amounts is accounting (usually swap), not a culprit in itself. Attribute writes with `fs_usage` or the power-log coalition table.
+- A large lifetime SSD write total alone isn't a failure signal. Media errors, critical warnings and falling Available Spare are.
 
 - Verify a cause before blaming it. Battery: check MitigationState and peak power pressure. Heat: check average and maximum temperature. Storage: check free GB. Report these as "not the problem" or leave them out.
 - Separate your own collection load from the device's normal behavior. Crash-log transfers flood the logs with `afcd` lines; re-measure on a clean capture.
@@ -392,6 +495,9 @@ Typical high-impact iOS/iPadOS fixes, ordered by impact for the evidence found:
 5. Turn off automatic **App Updates** and update manually while charging.
 6. Restart the device.
 7. Battery service if health is ≤ 80%, framed as battery life, not speed, unless throttling was proven.
+8. On older devices running a newer OS: turn on **Reduce Motion** and **Reduce Transparency**, which cut GPU blur/animation cost. If Apple Intelligence is on and unused, turning it off frees on‑device model work and about 7 GB.
+9. Storage or System Data bloat: install the latest point update; clear Safari website data; empty Recently Deleted (Photos, Messages); set Messages › Keep Messages to 1 year; **Offload** (keeps data) or delete and reinstall cache‑heavy apps; restart. Erase‑and‑restore is the last resort.
+10. Review apps with **Always** location access. They can run in the background regardless of Background App Refresh.
 
 Menu paths by UI language. Use the device's language from section 1:
 
@@ -404,6 +510,13 @@ Menu paths by UI language. Use the device's language from section 1:
 | Shut down | Settings › General › Shut Down | Ajustes › General › Apagar | 设置 › 通用 › 关机 |
 | Battery health | Settings › Battery › Battery Health & Charging | Ajustes › Batería › Salud y carga de la batería | 设置 › 电池 › 电池健康与充电 |
 | Developer Mode | Settings › Privacy & Security › Developer Mode | Ajustes › Privacidad y seguridad › Modo de desarrollador | 设置 › 隐私与安全性 › 开发者模式 |
+| Reduce Motion | Settings › Accessibility › Motion › Reduce Motion | Ajustes › Accesibilidad › Movimiento › Reducir movimiento | 设置 › 辅助功能 › 动态效果 › 减弱动态效果 |
+| Reduce Transparency | Settings › Accessibility › Display & Text Size › Reduce Transparency | Ajustes › Accesibilidad › Pantalla y tamaño del texto › Reducir transparencia | 设置 › 辅助功能 › 显示与文字大小 › 降低透明度 |
+| Offload app | Settings › General › iPhone Storage › app › Offload App | Ajustes › General › Almacenamiento del iPhone › app › Desinstalar app | 设置 › 通用 › iPhone储存空间 › App › 卸载App |
+| Safari data | Settings › Apps › Safari › Clear History and Website Data | Ajustes › Apps › Safari › Borrar historial y datos de sitios web | 设置 › App › Safari › 清除历史记录与网站数据 |
+| Location access | Settings › Privacy & Security › Location Services | Ajustes › Privacidad y seguridad › Localización | 设置 › 隐私与安全性 › 定位服务 |
+
+Translated labels can shift between OS versions. If a label doesn't match, confirm it on a screenshot of the device or from the device's UI language before sending.
 
 Third-party apps keep their own language. Give in-app paths in the app's language (for example 我 › 设置 › 通用设置 › 视频自动播放 in Weibo).
 
@@ -415,6 +528,8 @@ Write for the device owner, who may not be the person asking.
 - Open critically and concretely: numbers from the device's own records (memory kills per week, freezes per day and the trend, system resets). Say "the phone's own diagnostic records show…".
 - Name the 1–2 main culprits with the strongest evidence; don't list every minor finding.
 - **Reassure before asking:** turning off Background App Refresh does **not** stop notifications. Messages, calls and calendar reminders are pushed by the server and keep arriving; apps just load fresh content a second later when opened. Clearing a cache doesn't delete accounts, chats, or favorites.
+  - Push notifications go through Apple's push service (APNs), independent of Background App Refresh.
+  - The only exception to mention when relevant: mail accounts set to *fetch* rather than push check less often until opened.
 - Don't tell the owner to delete apps they use. Adjust settings or close them after use instead.
 - Leave out things that aren't problems (healthy storage, a battery that isn't throttling) unless the owner is worried about them.
 - Keep it short: 4–6 steps, "takes 5 minutes", ending with the benefit.
