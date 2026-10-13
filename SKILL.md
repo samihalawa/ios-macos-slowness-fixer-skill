@@ -487,6 +487,10 @@ Patterns and fixes:
 | Cleanup job that kills itself | A reaper whose own command line matches its kill pattern; its log never appears, and `last terminating signal = 15` | Exclude its own PID and script name; then run it with `launchctl kickstart -k` and read the log back |
 | Device or network retry loop | One warning dominating the log, e.g. a pinned Bluetooth device that is absent | Follow the system default device instead of a pinned one |
 | Dead entries | The program path no longer exists | Harmless; remove only with the user's OK |
+| Background AI workflows inside an app | Scheduled agents or summaries (screenpipe pipes, "activities", semantic context; Foresight's 4‑hourly refresh at 100% CPU for hours) running on top of the app's core job | Keep the core feature (recording, sync), and turn off the scheduled AI jobs in the app's settings or pipe files, or remove the job's launch agent. Read back after restart: some apps force settings back on from a built‑in policy |
+| Tight polling scripts | A KeepAlive AppleScript or shell loop with `delay 0.5` driving System Events, which then sits at 10–50% CPU | Lengthen the loop delay (e.g. 2 s) rather than removing the automation; measure System Events before and after |
+
+Never disable deliberate business automations (Codex automations, Claude scheduled tasks, publish jobs) as "background load". List them with their schedule and leave them to the user.
 
 Back up every plist and script before editing, reload with `launchctl bootout`/`bootstrap`, and read the state back.
 
