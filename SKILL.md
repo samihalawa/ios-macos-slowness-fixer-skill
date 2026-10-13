@@ -496,6 +496,29 @@ Back up every plist and script before editing, reload with `launchctl bootout`/`
 
 Orphan reapers only catch processes whose parent has exited (ppid 1). Many copies of an MCP server under a **live** long-running agent session are not orphans: report the count and parents instead of killing them silently.
 
+### 4.3 ChatGPT / Codex desktop app
+
+Known, widely reported causes (openai/codex #29510, #40540, #35269, #20980, #38720/#38771): the app-server loads whole conversation files into memory and keeps them; one MCP stack starts per opened thread; renderers accumulate; a Computer Use helper can respawn in a loop. Restarting the app clears it, but it refills.
+
+```bash
+C=~/.codex
+du -sh $C/sessions $C/archived_sessions; ls -la $C/*.sqlite* | awk '{printf "%8.0f MB %s\n",$5/1048576,$9}'
+find $C/sessions -type f -name '*.jsonl' -size +100M | wc -l                       # giant threads
+find $C/sessions -type f -size +300M -exec ls -la {} \; | awk '{printf "%.0f MB %s %s %s\n",$5/1048576,$6,$7,$9}' | sort -rn | head
+grep -hE '^(kind|status|rrule|target_thread_id)' $C/automations/*/automation.toml   # heartbeat + target_thread_id = one ever-growing thread
+grep -n '^notify' $C/config.toml; pgrep -f SkyComputerUseService | wc -l           # Computer Use storm check
+ps -Ao comm= | grep -c 'Codex (Renderer)'                                           # renderer pile-up
+```
+
+Signals: Codex killed by macOS at 10-15 GB (`per-process-limit` Jetsam with `codex` largest); sessions folder tens of GB; files of 0.5-2 GB still being appended; "heartbeat" automations pinned to one thread and running hourly.
+
+Fixes, safest first:
+1. Archive dormant conversation files by moving them (not deleting) out of `~/.codex/sessions` into a sibling folder that keeps the date layout, skipping any file Codex has open (`lsof`) and any pinned automation thread. Untouched >21 days is a good default; giant (>300 MB) threads untouched for 2+ days too.
+2. High-frequency heartbeat automations pinned to one thread: with the user's OK, pause or unpin them (fresh thread each run), or convert to `cron` with state in the automation's `memory.md`. Back up `~/.codex/automations` first.
+3. Memory watchdog: act on the app-server below macOS's own kill threshold (e.g. 9 GB) with SIGTERM, then SIGKILL after a grace period; never use an AppleScript quit for unattended restarts (it stalls on a confirmation dialog).
+4. Computer Use storm: if `SkyComputerUseService` keeps multiplying, comment out the `notify` hook in `config.toml` (backup first).
+5. Quit and reopen ChatGPT to release memory already held by the app-server.
+
 ## 5. Interpretation rules (lessons that prevent wrong diagnoses)
 
 - Rule out a recent OS update (2.8) before diagnosing anything long‑term.
