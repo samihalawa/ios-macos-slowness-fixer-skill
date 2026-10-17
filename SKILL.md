@@ -494,6 +494,8 @@ Never disable deliberate business automations (Codex automations, Claude schedul
 
 Back up every plist and script before editing, reload with `launchctl bootout`/`bootstrap`, and read the state back.
 
+Shared automation browsers pile up tabs too (seen: 93 tabs, 11.5 GB on a CDP Chrome at :9222). Count with `curl -s 127.0.0.1:9222/json/list`; probe each page with a trivial `Runtime.evaluate` over its WebSocket. A tab an agent is driving answers at once; frozen background tabs do not. Close only non-answering tabs, with `PUT /json/close/<id>` (newer Chrome rejects GET), save their URLs first, and add the same rule to the periodic reaper with a tab-count threshold. Killing hours-old MCP processes alone can release most of that renderer memory, because they hold debugger sessions open.
+
 Orphan reapers only catch processes whose parent has exited (ppid 1). Many copies of an MCP server under a **live** long-running agent session are not orphans: report the count and parents instead of killing them silently.
 
 ### 4.3 ChatGPT / Codex desktop app
