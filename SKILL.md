@@ -543,7 +543,14 @@ Killing leftovers only treats symptoms: agents keep starting MCP stacks, builds 
 | Throttle apps (efficiency cores, CPU cap) | App Tamer (St. Clair Software, paid, 3.0 in 2026) | The maintained GUI equivalent of `taskpolicy`/`nice`. AppPolice (free, open source) is unmaintained since 2016. |
 | See what is happening | [exelban/stats](https://github.com/exelban/stats) (`brew install stats`) | Free menu-bar monitor for CPU (P/E cores), memory, swap, disk. |
 
-All of these clean only orphans (parent dead). None prevents a live agent from opening too many threads; that is `agents.max_concurrent_threads_per_session` in Codex and auto-archiving idle sessions in Claude (Settings → Claude Code → Archive inactive sessions).
+**Root cause and the levers that remove it (research 2026-10-21):** stdio MCP is a 1:1 pipe, so every session and every subagent starts its own copy of every configured server (anthropics/claude-code #99831 open, #48649, #28860; ~1 GB per session reported). In order of value:
+1. Fewer concurrent threads: Codex `agents.max_concurrent_threads_per_session`; Claude auto-archive idle sessions.
+2. No `npx -y pkg@latest` launchers: each keeps an `npm exec` wrapper alive next to the server (2 processes per instance). Install the server globally and point the config at the binary.
+3. Share stateless servers over HTTP: one process per server for all sessions. Established: sparfenyuk/mcp-proxy (~2.8k★), supercorp-ai/supergateway (~2.9k★), 1mcp-app/agent (aggregator), docker/mcp-gateway, MetaMCP, MCPJungle; lazy-start routers: fledgeling-co/mcp-router, thebtf/mcp-mux. Keep browser, computer-use and REPL servers per session (they hold state).
+4. Free priority tools instead of scripts: avantigroupai/ProcessX (agent-aware, reversible background band; notes that `renice` is one-way for non-root), Digital-Shane/OpenTamer (~88★).
+5. Hard caps need a Linux VM (no cgroups on macOS): william1010121/ai-cgroup (OrbStack), Rag0n/agentbox and rappdw/sandy (containers), apple/container. These break host-only tools (Keychain, computer use, local Chrome), so use them for builds/tests only.
+
+The cleaners in the table above clean only orphans (parent dead). None prevents a live agent from opening too many threads; that is `agents.max_concurrent_threads_per_session` in Codex and auto-archiving idle sessions in Claude (Settings → Claude Code → Archive inactive sessions).
 
 WindowServer is the single compositor every window and every screen capture goes through. Screen recorders (screenpipe), Computer Use screenshots and browser capture sessions (`pmset -g assertions | grep Capturing`) all make it copy full-resolution frames, so one capturing app raises it for everyone.
 
