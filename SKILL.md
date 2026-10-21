@@ -532,6 +532,19 @@ Killing leftovers only treats symptoms: agents keep starting MCP stacks, builds 
 - For processes you launch yourself, `taskpolicy -c utility|background`, `-m <MiB>` (memory limit) and `-j` (jetsam priority) are launch-time only.
 - Codex fan-out can also be capped in `~/.codex/config.toml` with `agents.max_concurrent_threads_per_session` (Multi-Agent V2 reads it under `[features.multi_agent_v2]`). Each open thread or subagent holds its own full MCP set.
 
+**Ready-made tools for any Mac (checked 2026-10-21; prefer these to custom scripts):**
+
+| Need | Tool | Notes |
+|---|---|---|
+| Auto-clean leftovers from Claude Code / Codex | [theQuert/cc-reaper](https://github.com/theQuert/cc-reaper) | Most complete and most active (commits 2026-10-18). `./install.sh` adds a 10-min LaunchAgent (orphans by PPID=1 and process group), Claude/Codex session-end hooks, a runaway-CPU guard, a worktree janitor and an optional menu-bar app. Read its worktree rules before enabling on repos with uncommitted work. |
+| One-command audit, any OS | [TheStack-ai/zclean](https://github.com/TheStack-ai/zclean) (`npx --yes z-clean audit`) | Most starred (67). Dry-run first; `zclean --yes` kills only confirmed-stale processes. Its scheduler only audits, it never cleans automatically. |
+| Daemon alternative | `brew install jhlee0409/tap/proc-janitor` | Rust daemon with grace period and whitelist; small project. |
+| Smaller scripts | tiagonrodrigues/agent-reaper (Homebrew, tiers incl. dedupe), tjp2021/devreap (Go, multi-signal scoring), 41fred/mcp-orphan-monitor (50-line LaunchAgent) | Few users; fine as references. |
+| Throttle apps (efficiency cores, CPU cap) | App Tamer (St. Clair Software, paid, 3.0 in 2026) | The maintained GUI equivalent of `taskpolicy`/`nice`. AppPolice (free, open source) is unmaintained since 2016. |
+| See what is happening | [exelban/stats](https://github.com/exelban/stats) (`brew install stats`) | Free menu-bar monitor for CPU (P/E cores), memory, swap, disk. |
+
+All of these clean only orphans (parent dead). None prevents a live agent from opening too many threads; that is `agents.max_concurrent_threads_per_session` in Codex and auto-archiving idle sessions in Claude (Settings → Claude Code → Archive inactive sessions).
+
 WindowServer is the single compositor every window and every screen capture goes through. Screen recorders (screenpipe), Computer Use screenshots and browser capture sessions (`pmset -g assertions | grep Capturing`) all make it copy full-resolution frames, so one capturing app raises it for everyone.
 
 ## 5. Interpretation rules (lessons that prevent wrong diagnoses)
