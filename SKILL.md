@@ -521,6 +521,19 @@ Fixes, safest first:
 4. Computer Use storm: if `SkyComputerUseService` keeps multiplying, comment out the `notify` hook in `config.toml` (backup first).
 5. Quit and reopen ChatGPT to release memory already held by the app-server.
 
+### 4.4 Contain agent work instead of reaping it (macOS "Efficiency mode")
+
+Killing leftovers only treats symptoms: agents keep starting MCP stacks, builds and whole-home searches. Windows contains this with Efficiency mode (EcoQoS) and Job Objects; Linux uses cgroups. macOS has no user-facing cgroups, but the same effect comes from `taskpolicy` and `nice`, applied to everything descended from an agent CLI (Claude Code `claude`, Codex app-server):
+
+- MCP servers and file-search tools (`find`, `rg`, `grep`, `mdfind`, `du`): `taskpolicy -b -p <pid>` (efficiency cores plus throttled disk I/O).
+- Builds and other agent children: `renice -n 10 -p <pid>` (all cores, but yields to the app in front).
+- Never GUI apps, WindowServer, the user's browser or screen recorders: they are not descendants of the agent CLIs.
+- Act once per process (only `nice == 0`), every ~30 s from a launchd agent with `ProcessType=Background`. Load average stays high (it counts niced threads); judge success by UI responsiveness, not load.
+- For processes you launch yourself, `taskpolicy -c utility|background`, `-m <MiB>` (memory limit) and `-j` (jetsam priority) are launch-time only.
+- Codex fan-out can also be capped in `~/.codex/config.toml` with `agents.max_concurrent_threads_per_session` (Multi-Agent V2 reads it under `[features.multi_agent_v2]`). Each open thread or subagent holds its own full MCP set.
+
+WindowServer is the single compositor every window and every screen capture goes through. Screen recorders (screenpipe), Computer Use screenshots and browser capture sessions (`pmset -g assertions | grep Capturing`) all make it copy full-resolution frames, so one capturing app raises it for everyone.
+
 ## 5. Interpretation rules (lessons that prevent wrong diagnoses)
 
 - Rule out a recent OS update (2.8) before diagnosing anything long‑term.
@@ -543,7 +556,8 @@ Do these when they are in scope and the targets are clearly leftovers. Confirm f
 
 ```bash
 xcrun simctl shutdown all                          # idle simulators
-pkill -f chrome-devtools-mcp                       # only after confirming they are orphaned (hours old, no live parent session)
+pkill -f chrome-devtools-mcp                       # only after confirming they are orphaned (parent dead); under a live Codex app-server they usually belong to running subagents
+# macOS `ps` has no `etimes`; parse `etime` ([[dd-]hh:]mm:ss) before any age comparison
 brew install libimobiledevice ideviceinstaller     # missing tooling
 ```
 
