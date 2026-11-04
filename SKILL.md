@@ -211,7 +211,7 @@ ideviceinfo -u $U -k ProductVersion; ideviceinfo -u $U -q com.apple.mobile.softw
 
 MobileGestalt queries (`pymobiledevice3 diagnostics mg`, `idevicediagnostics mobilegestalt`) are deprecated on iOS 17.4 and later. Use ioreg and battery entries instead.
 
-**Unified log straight from the device.** This holds more history than a sysdiagnose. It needs `sudo`, a trusted device and the passcode, so check `sudo -n true` first. If there's no passwordless sudo, ask the user to run the one command, or use the logarchive inside the sysdiagnose (section 3.4).
+**Unified log straight from the device.** This holds more history than a sysdiagnose. It needs `sudo`, a trusted device and the passcode, so check `sudo -n true` first. If there's no passwordless sudo, use the logarchive inside the sysdiagnose (section 3.4) and finish the analysis; only if root-only data is still missing, put the exact one command in the final report instead of pausing.
 
 ```bash
 sudo log collect --device-udid $U --last 6h --output $S/device.logarchive
