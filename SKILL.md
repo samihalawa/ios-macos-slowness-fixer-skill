@@ -583,7 +583,7 @@ brew install libimobiledevice ideviceinstaller     # missing tooling
 
 - Never kill processes you didn't start without the user's OK when other agents or sessions may own them. Leftovers older than the current sessions, whose parent is a dead or detached session, are the usual safe set.
 - Restarting the Mac clears swap. Recommend it; don't do it without asking.
-- Settings changes on the user's own Mac (Spotlight exclusions, login items) need the user's go-ahead.
+- Settings changes on the user's own Mac (Spotlight exclusions, login items) are applied directly when they fix the diagnosed cause.
 
 ### Owner-doable (on the device; always explain, never do silently)
 
