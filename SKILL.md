@@ -1,11 +1,11 @@
 ---
 name: ios-macos-slowness-fixer-skill
-description: "Diagnose and fix slowness, freezes, crashes, overheating, and battery drain on any Apple device: iPhone, iPad, or Mac. Use when someone says a phone, tablet, or Mac is slow, laggy, buggy, crashy, freezing, restarting, hot, or draining. By default it detects where the agent is running (local macOS shell, sandbox, or cloud), which tools are available (Bash, Desktop Commander MCP, computer-use, libimobiledevice, pymobiledevice3, devicectl), lists connected iOS/iPadOS devices, collects evidence from crash logs, Jetsam memory kills, hang tracer analytics, sysdiagnose power logs, and live system logs, finds the real cause, applies safe fixes, and writes an owner-facing fix plan in the owner's language with menu paths in the device's UI language."
+description: "Diagnose and fix slowness, freezes, crashes, overheating, battery drain, and low disk space or storage bloat on any Apple device: iPhone, iPad, or Mac. Use when someone says a phone, tablet, or Mac is slow, laggy, buggy, crashy, freezing, restarting, hot, draining, out of space, or full of backups, logs, duplicates, or build caches. By default it detects where the agent is running (local macOS shell, sandbox, or cloud), which tools are available (Bash, Desktop Commander MCP, computer-use, libimobiledevice, pymobiledevice3, devicectl), diagnoses CPU/swap/jetsam/thermal/hang/launchd causes and real 10-200 GB disk blocks (avoiding virtual mounts and cloud downloads), executes Trash-first 80/20 cleanups (.bak/.tmp/atomic browser temps/logs/build bloat/caches and SHA-256 verified duplicates while preserving AI agent sessions, memories, and personal media), applies safe fixes, and writes an owner-facing plan."
 ---
 
-# iOS / iPadOS / macOS Slowness Fixer
+# iOS / iPadOS / macOS Slowness & Storage Fixer
 
-Find the real reason an Apple device is slow or crashy from the device's own records, fix what an agent can safely fix, and give the owner a short, convincing plan for the rest.
+Find the real reason an Apple device is slow, crashy, or out of disk space from the device's own records, fix and clean what an agent can safely handle, and give the owner a short, convincing plan for the rest.
 
 Evidence beats intuition. Every claim in the final report must trace to a log, counter, or table read in this run.
 
@@ -343,10 +343,12 @@ system_profiler SPPowerDataType | grep -E 'Cycle Count|Condition|Maximum Capacit
 ```
 
 Read it as:
-- Load average far above the core count means overloaded.
+- Load average far above the core count means overloaded; if shells themselves hang on startup, read `~/.zshenv`, `~/.zprofile`, and `~/.zshrc` for blocking daemon hooks.
 - `stored in compressor` × 16 KB vs `occupied by compressor` × 16 KB is the compression load.
 - `Swapouts` × 16 KB since boot gives GB written to the SSD as swap.
-- Swap close to its total means no headroom left.
+- **Disk full caps swap:** always pair `sysctl vm.swapusage` (`used`, not `free`) with `df -g /System/Volumes/Data`. Under `~30 GB` free, macOS cannot grow swap and freezes or triggers Jetsam kills.
+- **Swap hogs hide from RSS ranking:** dozens of orphaned helpers (`ppid=1`) can sit at `~6 MB` RSS while holding `~500 MB` in swap each (`25+ GB` total). Always check orphaned runner shapes (`mcp|npm exec|npx |uvx|start-mcp-server|language_server`) via `ps -axo pid=,ppid=,rss=,etime=,command=` with an anchored `KEEP` pattern rather than sorting only by RSS.
+- **Sparse files & virtual mounts:** measure sparse disk images like `Docker.raw` with `du -sh`, never `ls -lh`. Verify apparent huge folders (`DeviceFS`, network/FUSE mounts) with `mount` and `du -shx` — a virtual `fskit`/`devicefs` mount can show `65+ GB` while using `4 KB` locally. Note that `df` can lag APFS deletions by minutes; verify freed bytes with `du`.
 
 Group memory and CPU by app family, since one app often has hundreds of helper processes:
 
@@ -485,6 +487,8 @@ Patterns and fixes:
 | KeepAlive crash loop | `runs =` climbing fast plus a non-zero `last exit`, e.g. a startup step hitting a rate limit and the relaunch hitting it again | Raise `ThrottleInterval` (e.g. 300) and reload; fix the startup failure |
 | Duplicate autostart | The same program in two plists, e.g. the app's own login item plus a custom KeepAlive agent | Keep the one with the wanted behavior and turn off the other at its source (app setting), so it isn't recreated |
 | Cleanup job that kills itself | A reaper whose own command line matches its kill pattern; its log never appears, and `last terminating signal = 15` | Exclude its own PID and script name; then run it with `launchctl kickstart -k` and read the log back |
+| Reaper starved by `ProcessType=Background` | Under high load, a reaper/QoS LaunchAgent sits minutes in `dyld` and times out because `Background` throttles it most when needed | Give the reaper/QoS agent itself `ProcessType=Standard` (while applying `taskpolicy -b` / `renice` only to agent child builds/searches) |
+| Full-disk periodic `StartInterval` scan | A LaunchAgent running `find /Applications -xattrname` or full-tree sweeps every 30 s, saturating CPU permanently | Switch `StartInterval` to `WatchPaths` on the exact target folders, or use Spotlight (`mdfind`) |
 | Device or network retry loop | One warning dominating the log, e.g. a pinned Bluetooth device that is absent | Follow the system default device instead of a pinned one |
 | Dead entries | The program path no longer exists | Harmless; remove only with the user's OK |
 | Background AI workflows inside an app | Scheduled agents or summaries (screenpipe pipes, "activities", semantic context; Foresight's 4‑hourly refresh at 100% CPU for hours) running on top of the app's core job | Keep the core feature (recording, sync), and turn off the scheduled AI jobs in the app's settings or pipe files, or remove the job's launch agent. Read back after restart: some apps force settings back on from a built‑in policy |
@@ -494,7 +498,7 @@ Never disable deliberate business automations (Codex automations, Claude schedul
 
 Back up every plist and script before editing, reload with `launchctl bootout`/`bootstrap`, and read the state back.
 
-Shared automation browsers pile up tabs too (seen: 93 tabs, 11.5 GB on a CDP Chrome at :9222). Count with `curl -s 127.0.0.1:9222/json/list`; probe each page with a trivial `Runtime.evaluate` over its WebSocket. A tab an agent is driving answers at once; frozen background tabs do not. Close only non-answering tabs, with `PUT /json/close/<id>` (newer Chrome rejects GET), save their URLs first, and add the same rule to the periodic reaper with a tab-count threshold. Killing hours-old MCP processes alone can release most of that renderer memory, because they hold debugger sessions open.
+Shared automation browsers pile up tabs too (seen: 95 tabs, 17.8 GB, 341% CPU on a CDP Chrome at :9222). Count with `curl -s 127.0.0.1:9222/json/list`; probe each page with `Performance.enable` + two `Performance.getMetrics` (`TaskDuration` delta over 3–6 s) calls over its WebSocket. That catches **both** frozen tabs (no response within 10 s → close via `PUT /json/close/<id>` after backing up URLs) **and** responsive CPU-burning tabs such as live video/WebRTC/interview pages (~95% CPU each while still answering `Runtime.evaluate` immediately). For responsive media hogs, pause media elements / disable tracks in place (preserving form state) or notify the owner rather than blindly closing tabs. Killing hours-old MCP processes alone can also release renderer memory, because they hold debugger sessions open.
 
 Orphan reapers only catch processes whose parent has exited (ppid 1). Many copies of an MCP server under a **live** long-running agent session are not orphans: report the count and parents instead of killing them silently.
 
@@ -517,7 +521,7 @@ Signals: Codex killed by macOS at 10-15 GB (`per-process-limit` Jetsam with `cod
 Fixes, safest first:
 1. Archive dormant conversation files by moving them (not deleting) out of `~/.codex/sessions` into a sibling folder that keeps the date layout, skipping any file Codex has open (`lsof`) and any pinned automation thread. Untouched >21 days is a good default; giant (>300 MB) threads untouched for 2+ days too.
 2. High-frequency heartbeat automations pinned to one thread: with the user's OK, pause or unpin them (fresh thread each run), or convert to `cron` with state in the automation's `memory.md`. Back up `~/.codex/automations` first.
-3. Memory watchdog: act on the app-server below macOS's own kill threshold (e.g. 9 GB) with SIGTERM, then SIGKILL after a grace period; never use an AppleScript quit for unattended restarts (it stalls on a confirmation dialog).
+3. Memory watchdog: default to notify/log-only (`DRYRUN=1`) above a threshold (e.g. 9 GB) unless the owner explicitly authorizes unattended kills—auto-killing Codex/app-server or live agent MCP servers aborts running threads mid-turn. Never use an AppleScript quit for unattended restarts (it stalls on a confirmation dialog), and when switching a reaper to notify-only, sweep every kill clause and sibling reaper daemon together.
 4. Computer Use storm: if `SkyComputerUseService` keeps multiplying, comment out the `notify` hook in `config.toml` (backup first).
 5. Quit and reopen ChatGPT to release memory already held by the app-server.
 
@@ -554,7 +558,80 @@ The cleaners in the table above clean only orphans (parent dead). None prevents 
 
 WindowServer is the single compositor every window and every screen capture goes through. Screen recorders (screenpipe), Computer Use screenshots and browser capture sessions (`pmset -g assertions | grep Capturing`) all make it copy full-resolution frames, so one capturing app raises it for everyone.
 
-## 5. Interpretation rules (lessons that prevent wrong diagnoses)
+## 5. Mac bulk storage cleanup, deduplication & bloat audit (80/20 fast gains)
+
+When disk space is tight (especially below `~30 GB` free where swap stalls) or the owner asks to reclaim storage and clear backups, logs, temp files, caches, or duplicates, optimize for **80/20 fast gains** first (tens of GB per move). Never stall on multi-hour video transcoding unless compression is explicitly requested.
+
+### 5.1 Hard exclusions (NEVER delete or overwrite)
+
+- **AI agent sessions, transcripts, memories, skills, and live settings:** preserve `~/.codex/{sessions,archived_sessions,memories,memories_v2,memories_extensions,thread_history_1.sqlite*,state_5.sqlite*,skills,agents,rules,AGENTS.md,config.toml,auth.json}`, sibling session archives (e.g. `~/.codex-sessions-archive`, `~/agent_sessions_archive`), `~/.claude/{projects,history.jsonl,agents,commands,skills,settings.json,.claude.json,CLAUDE.md}`, `~/.gemini/antigravity/{brain,conversations,conversation_summaries.db*,GEMINI.md,settings.json}`, and any `session-export-*` archives.
+- **Always-on recordings & native user stores:** never expire `~/.screenpipe` history, Apple Notes native containers (`group.com.apple.notes`), Voice Memos (`group.com.apple.VoiceMemos.shared`), or personal photos/videos unless SHA-256 verified identical to another surviving copy.
+- **Intentional structured bundles:** never deduplicate blindly by file content across separate bundle folders (for example vendor JDK/JRE runtimes, tender/legal submission packs, WhatsApp export folders, `.cargo` crate registries containing `Cargo.toml.orig`, or forensic evidence directories).
+
+### 5.2 Fast, cloud-safe full inventory (no partial `head`/`tail` shortcuts)
+
+1. Start from complete top-level listings (`ls -la`) plus Spotlight (`mdfind -onlyin ...`) for indexed user folders (`~`, `~/Downloads`, `~/git`) — avoid slow `find /` or recursive `du` across cloud-synced roots (`~/Desktop`, `~/Documents`, `~/Library/CloudStorage`, `~/Library/Mobile Documents`), which triggers cloud stalls and load spikes. (Note: if a sandboxed shell hangs listing `~/Downloads` due to macOS TCC privacy prompts, run through Desktop Commander MCP or an unsandboxed host shell.)
+2. **Account for every `10+ GB` / `100+ GB` block on the real filesystem:** run `mount` first and use `du -shx` / `du -d 1 -h` so virtual mounts (like `CoreDevice/DeviceFS` on `fskit`/`devicefs`, `4 KB` local vs `65 GB` apparent) and sparse VM disks (`Docker.raw` via `du`, never `ls -lh`) never skew the map.
+3. **Cover `mdfind`'s blind spots:** Spotlight skips hidden dotfiles (`~/.claude`, `~/.codex`, `~/.gemini`, `~/.config`, `~/.local`) and `~/Library/*`. Pair `mdfind` with targeted `python3` `os.walk` passes across dotdirs and `~/Library/Application Support` (pruning `.git`, `node_modules`, `sessions`, `archived_sessions`, `projects`, `brain`, `conversations`).
+4. **Skip iCloud dataless stubs before reading/hashing:** always check `os.lstat` and skip any file with `st.st_blocks == 0 and st.st_size > 0` so opening/hashing never triggers cloud downloads.
+
+```bash
+mount | grep -E 'devicefs|fskit|fuse|smbfs|nfs'
+du -shx ~/* ~/.[!.]* ~/Library/Caches/* ~/Library/Developer/* ~/Library/Containers/* ~/Library/Application\ Support/* 2>/dev/null | sort -hr
+# Spotlight search for backups/temp/partial downloads (collect complete output without head/tail):
+mdfind -onlyin "$HOME" 'kMDItemFSName == "*.bak" || kMDItemFSName == "*.bak-*" || kMDItemFSName == "*.bak.*" || kMDItemFSName == "*.tmp" || kMDItemFSName == "*.tmp-*" || kMDItemFSName == "*.orig" || kMDItemFSName == "*.crdownload" || kMDItemFSName == "*.part"'
+```
+
+### 5.3 Trash-first batch execution & 80/20 target classes
+
+Move all removals into timestamped folders inside Mac Trash (`~/.Trash/cleanup-batchN-<label>-<timestamp>/`, preserving relative paths) instead of irreversible `rm -rf`. That avoids safety blocks, keeps recovery trivial until the owner empties Trash, and prevents partial mistakes. For owner-locked read-only duplicate trees (`Errno 13`), grant `chmod u+w` on verified local junk (never bypass SIP/root permissions on system backups like `TCC.db.bak-*`). Guard against `PATH_MAX` failures on deeply self-nested recursive backup folders by moving the root folder directly.
+
+Work in parallel bulk batches across these highest-ROI classes (and generalize every newly discovered pattern across all sibling apps/dirs before finishing):
+
+1. **Silent multi-10 GB cloud/app caches (top check when disk <30 GB):**
+   - **Apple Notes CloudKit cache:** `~/Library/Containers/com.apple.Notes/Data/Library/Caches/CloudKit/*/Assets` (can exceed `100+ GB` while `cloudd` refills it; quit Notes first, then move `Assets` to Trash or clear it). Keep the `group.com.apple.notes` database intact.
+   - **`~/Library/Caches/CloudKit/com.apple.bird`** (`10+ GB` iCloud cache), **`Google/DriveFS/{lost_and_found,canceled_uploads,Logs,Crashpad}`** (`10–30+ GB`), **`com.docker.install/in_progress`**; clean Docker via `docker system prune -af --volumes` when Docker is running.
+2. **Developer build artifacts, simulators, and caches (20–70+ GB):**
+   - **Official tool cleaners first:** `xcrun simctl delete unavailable`, `brew cleanup --prune=all`, `npm cache clean`, `go clean -cache`. Inspect booted vs shutdown simulators (`xcrun simctl list devices -j`) and Xcode caches (`Xcode/{DerivedData,iOS DeviceSupport,Archives}`, `Library/Caches/{CocoaPods,ReactNative,org.swift.swiftpm}`).
+   - **Repo build outputs & deps:** Rust `src-tauri/target` (or `target/debug`), Swift `.build/`, Android `android/app/build`, `ios/Pods`, older `~/.gradle/caches/<old-ver>` (keep latest active version), `.gitignore`d verification/parity/test dump trees (`verify/`, `parity/`, `playwright-report/`, `midscene_run/`, keeping current state JSONs), and stale Python `venv`/`.venv`. **Rule for `node_modules`:** remove only `node_modules` sitting next to a lockfile (`package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lock*`) in inactive/archived repos — never remove `dist/**/node_modules`, `build/**/node_modules`, or `.xcarchive/**/node_modules` (those are bundled assets). Skip `uv` caches if locked by a live `uv` process.
+3. **Backups, stale logs, temp files & Electron/Chromium atomic leftovers:**
+   - All `.bak`, `.bak-*` (timestamped/session `.bak-YYYYMMDD-*`), `.tmp*`, `.screenpipe-backup-*`, `.old`, `.crdownload`, `.part`, non-registry `.orig`.
+   - **Chromium/Electron atomic-save orphan temp files** across all `~/Library/Application Support/*` browsers and Electron Partitions (`^\.(?:[A-Z0-9]{10}\.)?com\.(?:google\.Chrome|microsoft\.edgemac|anthropic\.claudefordesktop|openai\.codex)\..*\.[A-Za-z0-9]{6}$`).
+   - Browser/Electron caches (`Snapshots`, `Service Worker`, `Cache`, `Code Cache`, `GPUCache`, `Dawn*`, `File System`, `extensions_crx_cache`, `component_crx_cache`, `CachedExtensionVSIXs`, `logs` in Chrome, Edge, VS Code, Cursor, Notion, Claude Desktop, etc.), superseded CLI version directories (`~/.local/share/claude/versions/<old>`, `~/.claude/remote/ccd-cli/<old>`), old daily automation state dumps (keep latest 48 h + `seen.json`), and non-session oversized JSON caches (`~/.codex/cache/*`).
+4. **SHA-256 verified deduplication (never guess by filename alone):**
+   - **Same-dir numbered duplicates (`* (1).*`, `* 2.*`, `* copy.*`):** move to Trash only when `lstat` shows a non-dataless local file whose size and full SHA-256 match the stripped-suffix sibling in the same directory.
+   - **Synced-folder duplicates (e.g. `My Drive copy` vs canonical synced folder, `_Duplicates-Review`):** match by `(size, partial+full SHA-256)` regardless of filename/extension drift (e.g. missing `.mp4` suffix), moving only verified matches and leaving unique files untouched.
+   - **Cross-folder `>=5 MB` duplicates:** score canonical paths highest (canonical cloud/git/category folders over `Archives`, `drive-download-*`, `_old-organization-attempts`, or numbered copies), keeping one survivor per hash group.
+
+```bash
+# Non-destructive duplicate candidate scan skipping iCloud dataless stubs
+python3 -I - <<'PY'
+import os, stat
+roots = [os.path.expanduser(r) for r in ("~/Downloads", "~/Movies", "~/backups")]
+by_sz = {}
+for r in roots:
+    if not os.path.exists(r): continue
+    for dp, dns, fns in os.walk(r):
+        dns[:] = [d for d in dns if d not in ("node_modules", ".git", "Photos Library.photoslibrary")]
+        for fn in fns:
+            p = os.path.join(dp, fn)
+            if os.path.islink(p): continue
+            try: st = os.lstat(p)
+            except OSError: continue
+            if stat.S_ISREG(st.st_mode) and not (st.st_blocks == 0 and st.st_size > 0) and st.st_size >= 5_000_000:
+                by_sz.setdefault(st.st_size, []).append(p)
+print("candidate_size_buckets:", sum(1 for v in by_sz.values() if len(v) > 1))
+PY
+```
+
+### 5.4 Post-cleanup verification
+
+Before reporting completion:
+- Re-run `mdfind` and the dotdir/`~/Library/Application Support` walk to confirm zero missed `.bak*`/`.tmp*`/`.crdownload`/atomic Chromium temp files (except explicit root-protected or active lockfiles).
+- Verify all protected AI session, memory, and screen-recording folders remain intact with their entry counts.
+- Report exact per-batch item counts and `du -sk ~/.Trash/*` totals alongside `df -h /System/Volumes/Data`, noting any remaining multi-10 GB user-owned blocks or unreadable archives for the owner's decision to empty Trash.
+
+## 6. Interpretation rules (lessons that prevent wrong diagnoses)
 
 - Rule out a recent OS update (2.8) before diagnosing anything long‑term.
 - `kernel_task` writing huge amounts is accounting (usually swap), not a culprit in itself. Attribute writes with `fs_usage` or the power-log coalition table.
@@ -567,8 +644,10 @@ WindowServer is the single compositor every window and every screen capture goes
 - Rank by impact, in this order: system-wide resets and panics, memory kills, freeze counts and their trend, then per-app memory, energy, writes, and background abuse.
 - Distinguish **apps the owner uses** (fix their settings: background refresh, autoplay, cache) from **apps that misbehave and aren't essential** (offer deletion, saying their data is safe in the cloud when true).
 - Correct earlier statements explicitly when deeper evidence contradicts them.
+- Verify steady state 2–3 minutes after a mitigation (load, swap, free disk) rather than declaring recovery from an instantaneous drop.
+- When verifying iCloud sync on iOS via `devicectl` + `pymobiledevice3 syslog live`, keep the target app in the foreground until `CKFetchRecordZoneChangesOperation` completes—switching apps mid-fetch cancels it (`CKError 20`) and proves nothing.
 
-## 6. Fixes
+## 7. Fixes
 
 ### Agent-doable (Mac, or with host access)
 
@@ -621,7 +700,7 @@ Translated labels can shift between OS versions. If a label doesn't match, confi
 
 Third-party apps keep their own language. Give in-app paths in the app's language (for example 我 › 设置 › 通用设置 › 视频自动播放 in Weibo).
 
-## 7. Owner-facing report
+## 8. Owner-facing report
 
 Write for the device owner, who may not be the person asking.
 
@@ -639,15 +718,15 @@ Write for the device owner, who may not be the person asking.
   - a generated poster through OpenRouter (`OPENROUTER_API_KEY` from the user's global env; model `google/gemini-3-pro-image`, `modalities: ["image","text"]`, `image_config: {aspect_ratio: "9:16", image_size: "2K"}`). Give it every exact string to render, then read the image back and check every word and number. Fix small defects (a duplicated row, for example) by cropping and splicing with PIL at uniform background rows rather than regenerating, and save the deliverable to the user's report folder.
 - Optional audio: read the plan aloud in the owner's language with TTS, speaking the content directly with no meta instructions.
 
-## 8. Output contract
+## 9. Output contract
 
 Finish with:
 
-1. Device(s) checked, how they were reached (direct shell, sandbox override, Desktop Commander), and which evidence layers were read (crash logs, Jetsam, analytics, live log, sysdiagnose power log, `vm_stat`).
+1. Device(s) checked, how they were reached (direct shell, sandbox override, Desktop Commander), and which evidence layers were read (crash logs, Jetsam, analytics, live log, sysdiagnose power log, `vm_stat`, or storage/mount audit).
 2. The root cause in one sentence, with its 3–5 strongest numbers.
 3. Corrections to earlier assumptions, if any.
-4. Fixes applied by the agent, each with read-back proof.
-5. The owner's step list (localized), plus any blocked item with the exact missing access.
+4. Fixes and storage cleanups applied by the agent (item counts, GiB staged in `~/.Trash`), each with read-back proof.
+5. The owner's step list (localized), plus any blocked item or Trash-empty / remaining multi-10 GB user-data choice.
 
 ## Env vars
 
